@@ -4,8 +4,6 @@ import (
 	"fmt"
 	"os"
 	"path"
-	"regexp"
-	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -132,10 +130,10 @@ func getComposeInfo(cmd *cobra.Command) (*composeInfo, error) {
 	}
 
 	if name == "" {
-		reg := regexp.MustCompile("[^a-z0-9-]+")
-		name = path.Base(path.Dir(f))
-		name = strings.ToLower(name)
-		name = reg.ReplaceAllString(name, "")
+		name = docker.NormalizeProjectName(path.Base(path.Dir(f)))
+	} else {
+		// docker compose normalizes explicitly provided project names too.
+		name = docker.NormalizeProjectName(name)
 	}
 
 	return &composeInfo{

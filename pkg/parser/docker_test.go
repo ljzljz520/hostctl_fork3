@@ -9,8 +9,10 @@ import (
 
 	"github.com/docker/docker/client"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/guumaster/hostctl/pkg/docker"
+	"github.com/guumaster/hostctl/pkg/types"
 )
 
 func TestNewProfileFromDocker(t *testing.T) {
@@ -68,6 +70,20 @@ func TestNewProfileFromDocker(t *testing.T) {
 	})
 }
 
+func webWebcacheCompose() *strings.Reader {
+	return strings.NewReader(`
+version: "3"
+services:
+  web:
+    image: nginx
+  webcache:
+    image: redis
+  db:
+    container_name: redis
+    image: redis
+`)
+}
+
 func TestNewProfileFromDockerCompose(t *testing.T) {
 	t.Run("Compose all", func(t *testing.T) {
 		r := strings.NewReader(`
@@ -117,6 +133,205 @@ networks:
 
 		assert.Equal(t, []string{"172.0.0.2", "172.0.0.3"}, p.IPList)
 		assert.Equal(t, []string{"container1_1.loc", "container2_1.loc"}, hosts)
+	})
+
+	t.Run("labelled: similar projects and web/webcache do not mix", func(t *testing.T) {
+		c := newClientWithResponse(t, map[string]string{
+			"/v1.22/containers/json": `[
+  {
+    "Id": "web1", "Names": ["/app-web-1"],
+    "Labels": { "com.docker.compose.project": "app", "com.docker.compose.service": "web" },
+    "NetworkSettings": { "Networks": { "default": { "NetworkID": "net1", "IPAddress": "172.0.0.2" }}}
+  },
+  {
+    "Id": "cache1", "Names": ["/app-webcache-1"],
+    "Labels": { "com.docker.compose.project": "app", "com.docker.compose.service": "webcache" },
+    "NetworkSettings": { "Networks": { "default": { "NetworkID": "net1", "IPAddress": "172.0.0.3" }}}
+  },
+  {
+    "Id": "myapp", "Names": ["/myapp_web_1"],
+    "Labels": { "com.docker.compose.project": "myapp", "com.docker.compose.service": "web" },
+    "NetworkSettings": { "Networks": { "default": { "NetworkID": "net1", "IPAddress": "172.0.0.4" }}}
+  },
+  {
+    "Id": "appx", "Names": ["/appx-web-1"],
+    "Labels": { "com.docker.compose.project": "appx", "com.docker.compose.service": "web" },
+    "NetworkSettings": { "Networks": { "default": { "NetworkID": "net1", "IPAddress": "172.0.0.6" }}}
+  },
+  {
+    "Id": "web2", "Names": ["/app-web-2"],
+    "Labels": { "com.docker.compose.project": "app", "com.docker.compose.service": "web" },
+    "NetworkSettings": { "Networks": { "default": { "NetworkID": "net1", "IPAddress": "172.0.0.5" }}}
+  }
+]`,
+		})
+
+		p, err := NewProfileFromDockerCompose(&docker.Options{
+			Domain:      "loc",
+			Cli:         c,
+			ComposeFile: webWebcacheCompose(),
+			ProjectName: "app",
+		})
+
+		require.NoError(t, err)
+
+		assert.Equal(t, []string{"172.0.0.2", "172.0.0.3", "172.0.0.5"}, p.IPList)
+		assert.Equal(t,
+			[]string{"web-1.loc", "webcache-1.loc", "web-2.loc"},
+			p.GetAllHostNames())
+	})
+
+	t.Run("unlabelled: exact match only, replicas and both separators", func(t *testing.T) {
+		c := newClientWithResponse(t, map[string]string{
+			"/v1.22/containers/json": `[
+  {
+    "Id": "web1u", "Names": ["/app_web_1"],
+    "NetworkSettings": { "Networks": { "default": { "NetworkID": "net1", "IPAddress": "172.0.0.2" }}}
+  },
+  {
+    "Id": "cacheu", "Names": ["/app_webcache_1"],
+    "NetworkSettings": { "Networks": { "default": { "NetworkID": "net1", "IPAddress": "172.0.0.3" }}}
+  },
+  {
+    "Id": "foreignu", "Names": ["/myapp_web_1"],
+    "NetworkSettings": { "Networks": { "default": { "NetworkID": "net1", "IPAddress": "172.0.0.4" }}}
+  },
+  {
+    "Id": "web2h", "Names": ["/app-web-2"],
+    "NetworkSettings": { "Networks": { "default": { "NetworkID": "net1", "IPAddress": "172.0.0.5" }}}
+  },
+  {
+    "Id": "trapu", "Names": ["/app-web-extra-1"],
+    "NetworkSettings": { "Networks": { "default": { "NetworkID": "net1", "IPAddress": "172.0.0.7" }}}
+  }
+]`,
+		})
+
+		p, err := NewProfileFromDockerCompose(&docker.Options{
+			Domain:      "loc",
+			Cli:         c,
+			ComposeFile: webWebcacheCompose(),
+			ProjectName: "app",
+		})
+
+		require.NoError(t, err)
+
+		assert.Equal(t, []string{"172.0.0.2", "172.0.0.3", "172.0.0.5"}, p.IPList)
+		assert.Equal(t,
+			[]string{"web_1.loc", "webcache_1.loc", "web-2.loc"},
+			p.GetAllHostNames())
+	})
+
+	t.Run("custom container_name", func(t *testing.T) {
+		c := newClientWithResponse(t, map[string]string{
+			"/v1.22/containers/json": `[
+  {
+    "Id": "db", "Names": ["/redis"],
+    "Labels": { "com.docker.compose.project": "app", "com.docker.compose.service": "db" },
+    "NetworkSettings": { "Networks": { "default": { "NetworkID": "net1", "IPAddress": "172.0.0.2" }}}
+  },
+  {
+    "Id": "notdb", "Names": ["/redis2"],
+    "NetworkSettings": { "Networks": { "default": { "NetworkID": "net1", "IPAddress": "172.0.0.3" }}}
+  }
+]`,
+		})
+
+		p, err := NewProfileFromDockerCompose(&docker.Options{
+			Domain:      "example.com",
+			Cli:         c,
+			ComposeFile: webWebcacheCompose(),
+			ProjectName: "app",
+		})
+
+		require.NoError(t, err)
+
+		assert.Equal(t, []string{"172.0.0.2"}, p.IPList)
+		assert.Equal(t, []string{"redis.example.com"}, p.GetAllHostNames())
+	})
+
+	t.Run("prefix keeps full container names", func(t *testing.T) {
+		c := newClientWithResponse(t, map[string]string{
+			"/v1.22/containers/json": `[
+  {
+    "Id": "web1u", "Names": ["/app_web_1"],
+    "NetworkSettings": { "Networks": { "default": { "NetworkID": "net1", "IPAddress": "172.0.0.2" }}}
+  },
+  {
+    "Id": "web2h", "Names": ["/app-web-2"],
+    "Labels": { "com.docker.compose.project": "app", "com.docker.compose.service": "web" },
+    "NetworkSettings": { "Networks": { "default": { "NetworkID": "net1", "IPAddress": "172.0.0.5" }}}
+  }
+]`,
+		})
+
+		p, err := NewProfileFromDockerCompose(&docker.Options{
+			Domain:      "loc",
+			Cli:         c,
+			ComposeFile: webWebcacheCompose(),
+			ProjectName: "app",
+			KeepPrefix:  true,
+		})
+
+		require.NoError(t, err)
+
+		assert.Equal(t, []string{"app_web_1.loc", "app-web-2.loc"}, p.GetAllHostNames())
+	})
+
+	t.Run("network filter excludes other networks", func(t *testing.T) {
+		c := newClientWithResponse(t, map[string]string{
+			"/v1.22/networks": `[
+{"Id": "net1", "Name": "app_default" },
+{"Id": "net2", "Name": "app_other" }
+]`,
+			"/v1.22/containers/json": `[
+  {
+    "Id": "web1", "Names": ["/app-web-1"],
+    "Labels": { "com.docker.compose.project": "app", "com.docker.compose.service": "web" },
+    "NetworkSettings": { "Networks": { "app_default": { "NetworkID": "net1", "IPAddress": "172.0.0.2" }}}
+  },
+  {
+    "Id": "cache", "Names": ["/app-webcache-1"],
+    "Labels": { "com.docker.compose.project": "app", "com.docker.compose.service": "webcache" },
+    "NetworkSettings": { "Networks": { "app_other": { "NetworkID": "net2", "IPAddress": "172.0.0.9" }}}
+  }
+]`,
+		})
+
+		p, err := NewProfileFromDockerCompose(&docker.Options{
+			Domain:      "loc",
+			Cli:         c,
+			ComposeFile: webWebcacheCompose(),
+			ProjectName: "app",
+			Network:     "app_default",
+		})
+
+		require.NoError(t, err)
+
+		assert.Equal(t, []string{"172.0.0.2"}, p.IPList)
+		assert.Equal(t, []string{"web-1.loc"}, p.GetAllHostNames())
+	})
+
+	t.Run("ambiguous manifest errors before listing containers", func(t *testing.T) {
+		badCompose := strings.NewReader(`
+version: "3"
+services:
+  web:
+    container_name: dup
+    image: nginx
+  webcache:
+    container_name: dup
+    image: redis
+`)
+
+		_, err := NewProfileFromDockerCompose(&docker.Options{
+			Domain:      "loc",
+			ComposeFile: badCompose,
+			ProjectName: "app",
+		})
+
+		require.Error(t, err)
+		assert.ErrorIs(t, err, types.ErrAmbiguousComposeContainer)
 	})
 }
 

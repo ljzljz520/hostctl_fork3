@@ -1,7 +1,6 @@
 package parser
 
 import (
-	"fmt"
 	"strings"
 
 	dtypes "github.com/docker/docker/api/types"
@@ -25,20 +24,29 @@ func NewProfileFromDocker(opts *docker.Options) (*types.Profile, error) {
 }
 
 // NewProfileFromDockerCompose creates a new profile from docker info.
+//
+// Containers are attributed to compose services by joining three explicit
+// data sources: the service manifest of the compose file, the selected
+// project name and the running containers metadata (compose labels and
+// container names). Attribution errors abort before any profile is returned
+// so hosts content is never replaced on ambiguity.
 func NewProfileFromDockerCompose(opts *docker.Options) (*types.Profile, error) {
 	p := &types.Profile{}
+
+	services, err := docker.ParseComposeFile(opts.ComposeFile)
+	if err != nil {
+		return nil, err
+	}
 
 	containers, err := docker.GetContainerList(opts)
 	if err != nil {
 		return nil, err
 	}
 
-	composeServices, err := docker.ParseComposeFile(opts.ComposeFile, opts.ProjectName)
+	err = addFromComposeService(p, containers, services, opts)
 	if err != nil {
 		return nil, err
 	}
-
-	addFromComposeService(p, containers, composeServices, opts)
 
 	return p, nil
 }
@@ -54,7 +62,7 @@ func addFromContainer(profile *types.Profile, containers []dtypes.Container, opt
 
 			name := strings.Replace(c.Names[0], "/", "", -1)
 
-			name = fmt.Sprintf("%s.%s", name, opts.Domain)
+			name = name + "." + opts.Domain
 			routes = append(routes, types.NewRoute(n.IPAddress, name))
 		}
 	}
@@ -62,40 +70,44 @@ func addFromContainer(profile *types.Profile, containers []dtypes.Container, opt
 	profile.AddRoutes(routes)
 }
 
-func addFromComposeService(p *types.Profile, containers []dtypes.Container, srv []string, opts *docker.Options) {
+func addFromComposeService(
+	profile *types.Profile,
+	containers []dtypes.Container,
+	services map[string]*docker.ComposeService,
+	opts *docker.Options,
+) error {
+	var routes []*types.Route
+
 	for _, c := range containers {
+		attribution, err := docker.AttributeContainer(c, opts.ProjectName, services)
+		if err != nil {
+			return err
+		}
+
+		if attribution == nil || c.NetworkSettings == nil {
+			continue
+		}
+
+		fullName := ""
+		if len(c.Names) > 0 {
+			fullName = strings.TrimPrefix(c.Names[0], "/")
+		}
+
 		for _, n := range c.NetworkSettings.Networks {
 			if opts.NetworkID != "" && n.NetworkID != opts.NetworkID {
 				continue
 			}
 
-			name := strings.Replace(c.Names[0], "/", "", -1)
-
-			routes := routeFromService(srv, name, n.IPAddress, opts)
-			if len(routes) > 0 {
-				p.AddRoutes(routes)
+			host := attribution.HostBase
+			if opts.KeepPrefix && fullName != "" {
+				host = fullName
 			}
+
+			routes = append(routes, types.NewRoute(n.IPAddress, host+"."+opts.Domain))
 		}
 	}
-}
 
-func routeFromService(srv []string, name string, ip string, opts *docker.Options) []*types.Route {
-	// removeSuffix := regexp.MustCompile("(_[0-9]+)$")
-	routes := []*types.Route{}
+	profile.AddRoutes(routes)
 
-	for _, s := range srv {
-		if !strings.Contains(name, s) {
-			continue
-		}
-
-		// name := removeSuffix.ReplaceAllString(name, "")
-		if !opts.KeepPrefix {
-			name = strings.Replace(name, opts.ProjectName+"_", "", 1)
-		}
-
-		name = fmt.Sprintf("%s.%s", name, opts.Domain)
-		routes = append(routes, types.NewRoute(ip, name))
-	}
-
-	return routes
+	return nil
 }

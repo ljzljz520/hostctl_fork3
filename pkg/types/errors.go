@@ -28,4 +28,8 @@ var (
 
 	// ErrInvalidProfileHeader when the profile header is invalid.
 	ErrInvalidProfileHeader = errors.New("invalid format for profile header")
+
+	// ErrAmbiguousComposeContainer when a running container cannot be
+	// attributed to exactly one docker compose service of the selected project.
+	ErrAmbiguousComposeContainer = errors.New("ambiguous docker compose container")
 )
